@@ -1,7 +1,7 @@
 FROM alpine:latest
 
 # Add dependencies
-RUN apk add --no-cache git openssh bash curl gosu mariadb-client ca-certificates gettext
+RUN apk add --no-cache git openssh bash curl mariadb-client ca-certificates gettext
 
 # Create user git
 RUN addgroup -g 1000 git && adduser -D -u 1000 -G git -s /bin/bash git

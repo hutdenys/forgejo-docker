@@ -1,0 +1,148 @@
+extensions:
+  docker_observer:
+    endpoint: unix:///var/run/docker.sock
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+  docker_stats:
+    endpoint: unix:///var/run/docker.sock
+    collection_interval: 60s
+    timeout: 30s
+    metrics:
+      container.cpu.utilization:
+        enabled: true
+      container.cpu.usage.total:
+        enabled: true
+      container.cpu.usage.usermode:
+        enabled: true
+      container.cpu.usage.kernelmode:
+        enabled: true
+      container.memory.usage.total:
+        enabled: true
+      container.memory.percent:
+        enabled: true
+      container.memory.usage.limit:
+        enabled: true
+      container.network.io.usage.rx_bytes:
+        enabled: true
+      container.network.io.usage.tx_bytes:
+        enabled: true
+      container.network.io.usage.rx_dropped:
+        enabled: true
+      container.network.io.usage.tx_dropped:
+        enabled: true
+      container.blockio.io_service_bytes_recursive:
+        enabled: true
+      container.pids.count:
+        enabled: true
+      container.uptime:
+        enabled: true
+      container.restarts:
+        enabled: true
+
+  filelog:
+    include:
+      - /var/lib/docker/containers/*/*.log
+    include_file_path: true
+    operators:
+      - type: json_parser
+        if: body matches "^{.*}$"
+        parse_to: attributes
+        output: parse_container_name
+      - id: recombine
+        type: recombine
+        combine_field: body
+        is_first_entry: body matches "^\\d{4}-\\d{2}-\\d{2}T\\d{2}"
+      - type: regex_parser
+        id: parse_container_name
+        regex: '(?P<container_name>.+)'
+        parse_from: attributes.attrs.tag
+      - type: filter
+        id: exclude_otel_collector
+        expr: 'attributes.container_name matches "^otel-collector.*"'
+        action: drop
+
+
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: 'forgejo'
+          static_configs:
+            - targets: ['forgejo:3000']
+
+  mysql:
+    endpoint: db:3306
+    username: ${OTEL_USER}
+    password: ${OTEL_PASS}
+    database: forgejo
+    collection_interval: 10s
+    tls:
+      insecure: true
+      insecure_skip_verify: true
+
+processors:
+  batch:
+    send_batch_size: 1000
+    timeout: 10s
+
+  resourcedetection/env:
+    detectors: [env]
+    timeout: 2s
+    override: false
+
+  resourcedetection/system:
+    detectors: ["system"]
+    system:
+      hostname_sources: ["dns", "os"]
+
+  resourcedetection/docker:
+    detectors: [env, docker]
+    timeout: 2s
+    override: false
+
+exporters:
+  splunk_hec/logs:
+    token: "${LOGS_TOKEN}"
+    endpoint: "https://splunk:8088"
+    sourcetype: "forgejo-logs"
+    tls:
+      insecure_skip_verify: true
+
+  splunk_hec/metrics:
+    token: "${METRICS_TOKEN}"
+    endpoint: "https://splunk:8088"
+    sourcetype: "forgejo-metrics"
+    tls:
+      insecure_skip_verify: true
+
+  splunk_hec/traces:
+    token: "${TRACES_TOKEN}"
+    endpoint: "https://splunk:8088"
+    sourcetype: "forgejo-traces"
+    tls:
+      insecure_skip_verify: true
+
+service:
+  extensions: [docker_observer]
+  pipelines:
+    metrics:
+      # receivers: [docker_stats]
+      receivers: [docker_stats, mysql, prometheus]
+      processors: [resourcedetection/env, resourcedetection/system, resourcedetection/docker, batch]
+      exporters: [splunk_hec/metrics]
+
+    traces:
+      receivers: [otlp]
+      processors: [resourcedetection/env, resourcedetection/system, resourcedetection/docker, batch]
+      exporters: [splunk_hec/traces]
+
+    logs:
+      receivers: [filelog]
+      processors: [resourcedetection/env, resourcedetection/system, resourcedetection/docker, batch]
+      exporters: [splunk_hec/logs]
